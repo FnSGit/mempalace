@@ -249,6 +249,7 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
         "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
+        "prompt": str(data.get("prompt", "")),  # UserPromptSubmit field
     }
 
 
@@ -326,6 +327,86 @@ def hook_precompact(data: dict, harness: str):
     _output({})
 
 
+def hook_user_prompt_submit(data: dict, harness: str):
+    """
+    UserPromptSubmit hook: 从用户提示提取实体并注入 KG 事实。
+
+    流程：
+    1. 使用 entity_registry 从提示中提取实体名称
+    2. 对每个实体查询 KG（outgoing 关系）
+    3. 将事实格式化为紧凑上下文（最多 9500 字符）
+    4. 通过 additionalContext 字段注入（不阻塞）
+
+    返回: {"additionalContext": "..."} 或 {} 如果没有实体
+    """
+    from .entity_registry import EntityRegistry
+    from .knowledge_graph import KnowledgeGraph
+
+    parsed = _parse_harness_input(data, harness)
+    prompt = parsed.get("prompt", "")
+
+    if not prompt:
+        _output({})
+        return
+
+    _log(f"USER PROMPT SUBMIT: 检查实体 '{prompt[:50]}...'")
+
+    # 从提示中提取已知人物
+    registry = EntityRegistry()
+    people = registry.extract_people_from_query(prompt)
+
+    if not people:
+        _output({})
+        return
+
+    _log(f"找到 {len(people)} 个实体名称：{', '.join(people)}")
+
+    # 对每个实体查询 KG
+    kg = KnowledgeGraph()
+    facts = []
+    total_chars = 0
+    MAX_CONTEXT_CHARS = 9500  # Claude Code 限制是 10000，留缓冲
+
+    for name in people:
+        try:
+            results = kg.query_entity(name, direction="outgoing")
+            current_facts = [r for r in results if r.get("current", True)]
+
+            for fact in current_facts[:10]:  # 每个实体限制
+                line = f"- {fact['subject']} {fact['predicate']} {fact['object']}"
+                if fact.get("valid_from"):
+                    line += f"（自 {fact['valid_from']}）"
+
+                if total_chars + len(line) > MAX_CONTEXT_CHARS:
+                    break
+
+                facts.append(line)
+                total_chars += len(line) + 1  # +1 用于换行
+
+        except Exception as e:
+            _log(f"{name} 的 KG 查询错误：{e}")
+            continue
+
+    if not facts:
+        _output({})
+        return
+
+    # 格式化上下文块
+    context_lines = [
+        "[MemPalace 自动上下文 — 知识图谱事实]",
+        f"检测到的实体：{', '.join(people)}",
+        "",
+    ] + facts
+
+    context_text = "\n".join(context_lines)
+
+    _log(f"注入 {len(facts)} 个事实（{total_chars} 字符）")
+
+    # 注入而不阻塞
+    output = {"additionalContext": context_text}
+    _output(output)
+
+
 def run_hook(hook_name: str, harness: str):
     """Main entry point: read stdin JSON, dispatch to hook handler."""
     try:
@@ -338,6 +419,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "user-prompt-submit": hook_user_prompt_submit,
     }
 
     handler = hooks.get(hook_name)

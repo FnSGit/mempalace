@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -622,3 +622,45 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
     # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through
     # It should count messages and block at the interval
     assert result["decision"] == "block"
+
+
+# --- hook_user_prompt_submit ---
+
+
+def test_hook_user_prompt_submit_extracts_entities():
+    """测试 UserPromptSubmit hook 从提示中提取已知实体。"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    # 创建临时 KG 数据库
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2025-01-01")
+        kg.add_triple("Alice", "decided", "PostgreSQL over MongoDB", valid_from="2026-04-15")
+
+        # Mock stdin JSON 带实体在提示中
+        input_data = {
+            "session_id": "test-session-123",
+            "transcript_path": "/tmp/test.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Alice 对数据库做了什么决定？",
+        }
+
+        # Mock KG 和 Registry（mock 源模块，因为导入在函数内部）
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit, input_data, harness="claude-code"
+                )
+
+        # 应提取 "Alice" 并注入事实
+        assert "Alice" in output.get("additionalContext", "")
+        assert "PostgreSQL" in output.get("additionalContext", "")
+        assert "MongoDB" in output.get("additionalContext", "")
