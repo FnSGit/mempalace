@@ -655,7 +655,7 @@ def test_hook_user_prompt_submit_extracts_entities():
         mock_registry.extract_people_from_query.return_value = ["Alice"]
 
         with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
-            with patch("mempalace.entity_registry.EntityRegistry", return_value=mock_registry):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
                 output = _capture_hook_output(
                     hook_user_prompt_submit, input_data, harness="claude-code"
                 )
