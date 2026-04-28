@@ -352,7 +352,7 @@ def hook_user_prompt_submit(data: dict, harness: str):
     _log(f"USER PROMPT SUBMIT: 检查实体 '{prompt[:50]}...'")
 
     # 从提示中提取已知人物
-    registry = EntityRegistry()
+    registry = EntityRegistry.load()
     people = registry.extract_people_from_query(prompt)
 
     if not people:
