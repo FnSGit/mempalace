@@ -22,15 +22,23 @@ When a user mentions known entities (people/projects), this hook automatically i
 - AI: Knows the answer without needing to search
 
 **Installation:**
-```bash
-# Install the hook
-mempalace hooks-cli manage-userpromptsSubmit-wrapper --action install
 
-# Check status
-mempalace hooks-cli manage-userpromptsSubmit-wrapper --action status
+Hook 通过 wrapper 脚本自动管理 venv 环境。
+
+**手动配置：**
+在 `~/.claude/settings.json` 的 `hooks` 部分添加：
+
+```json
+"UserPromptSubmit": [{
+  "hooks": [{
+    "type": "command",
+    "command": "$HOME/.claude/hooks/mempal-userpromptsubmit-wrapper.sh",
+    "timeout": 10
+  }]
+}]
 ```
 
-The hook registers automatically in `~/.claude/settings.json` and creates a wrapper script at `~/.claude/hooks/mempal-userpromptsubmit-wrapper.sh`.
+Wrapper 脚本会激活 mempalace venv 环境，确保 Python 依赖可用。
 
 **See `docs/hooks-entity-injection.md` for full documentation, troubleshooting, and examples.**
 
@@ -66,12 +74,20 @@ chmod +x hooks/mempal_save_hook.sh hooks/mempal_precompact_hook.sh
 ```
 
 **UserPromptSubmit Hook:**
-```bash
-# Install via hooks CLI
-mempalace hooks-cli manage-userpromptsSubmit-wrapper --action install
+
+手动配置（可选）：在 `~/.claude/settings.json` 的 `hooks` 部分添加：
+
+```json
+"UserPromptSubmit": [{
+  "hooks": [{
+    "type": "command",
+    "command": "$HOME/.claude/hooks/mempal-userpromptsubmit-wrapper.sh",
+    "timeout": 10
+  }]
+}]
 ```
 
-This creates the wrapper script and updates settings.json automatically.
+Wrapper 脚本激活 mempalace venv 环境，确保 Python 依赖可用。
 
 ## Install — Codex CLI (OpenAI)
 

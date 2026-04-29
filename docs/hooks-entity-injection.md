@@ -14,7 +14,10 @@ MemPalace 在用户消息提及已知实体（人物、项目）时，自动将�
 
 ## 安装
 
-Hook 自动注册在 `~/.claude/settings.json`：
+Hook 通过 wrapper 脚本自动管理 venv 环境。配置已自动添加到 `~/.claude/settings.json`。
+
+**手动配置（可选）：**
+如需手动配置，在 `~/.claude/settings.json` 的 `hooks` 部分添加：
 
 ```json
 "UserPromptSubmit": [{
@@ -26,14 +29,12 @@ Hook 自动注册在 `~/.claude/settings.json`：
 }]
 ```
 
-Wrapper 脚本通过 `mempalace hooks-cli manage-userpromptsSubmit-wrapper` 管理：
-- **安装：** 创建 wrapper 脚本，注册 hook
-- **卸载：** 删除 wrapper 脚本，移除 hook 配置
-- **状态检查：** 验证 wrapper 和配置是否存在
+**Wrapper 脚本作用：**
+wrapper 脚本激活 mempalace venv 环境，确保 Python 依赖可用。
 
 ## 配置
 
-**启用/禁用：** 通过 `mempalace hooks-cli manage-userpromptsSubmit-wrapper --action uninstall` 禁用。
+**启用/禁用：** 手动编辑 `~/.claude/settings.json`，移除 `UserPromptSubmit` 配置块即可禁用。
 
 **上下文大小限制：** 9500 字符（Claude Code 硬限制是 10000）。
 
