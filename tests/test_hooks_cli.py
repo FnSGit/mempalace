@@ -670,40 +670,78 @@ def test_hook_user_prompt_submit_extracts_entities():
 
 
 def test_session_start_includes_taxonomy():
-    """测试 SessionStart wrapper script 包含宫殿分类。"""
+    """测试 SessionStart wrapper script 包含宫殿分类概览。
+
+    由于 wrapper 脚本位于用户目录 ~/.claude/hooks/，不在项目中，
+    此测试在本地有脚本时真正验证输出，CI 环境无脚本时跳过。
+    """
     import subprocess
-    import tempfile
     from pathlib import Path
 
-    # 创建临时目录模拟 session directory
+    # 获取真实 HOME 目录（pytest 可能修改环境）
+    # 方案：读取 /etc/passwd 或使用 subprocess 获取真实 HOME
+    try:
+        # 通过 id 命令获取用户名，然后查询 passwd 文件
+        result = subprocess.run(
+            ["getent", "passwd", os.environ.get("USER", "fengshuai")],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            # passwd 文件格式：username:x:uid:gid:gecos:home:shell
+            parts = result.stdout.strip().split(":")
+            real_home = parts[5] if len(parts) >= 6 else "/home/fengshuai"
+        else:
+            real_home = "/home/fengshuai"
+    except Exception:
+        real_home = "/home/fengshuai"
+
+    wrapper_script = Path(real_home) / ".claude" / "hooks" / "mempal-sessionstart-wrapper.sh"
+
+    # 如果 wrapper 脚本不存在，跳过测试（CI 环境）
+    if not wrapper_script.exists():
+        pytest.skip(f"Wrapper script not found: {wrapper_script}")
+
+    # 创建临时目录作为项目根目录，模拟完整场景
+    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        session_dir = Path(tmpdir) / ".session-memory"
+        project_root = Path(tmpdir)
+        session_dir = project_root / ".session-memory"
         session_dir.mkdir()
 
-        # 创建一个测试 diary 文件
-        diary_file = session_dir / "test-diary.md"
+        # 创建测试 session diary 文件（让 wrapper 不提前退出）
+        diary_file = session_dir / "test-diary-2026-04-29.md"
         diary_file.write_text(
-            "## 本次进展\n测试内容\n## 问题分析\n跳过内容\n## 关键决策\n重要决策\n"
+            "# Test Session Diary\n\n"
+            "## 本次进展\n测试内容\n\n"
+            "## 关键决策\n重要决策：使用 Palace Overview\n\n"
         )
 
-        # Mock mempalace status 命令的输出
-        mock_status_output = """
-Palace Status:
-WING: People
-  - Alice (5 drawers)
-  - Bob (3 drawers)
-WING: Projects
-  - MemPalace (12 drawers)
-"""
+        # 修改 PWD 环境变量，让 wrapper 脚本使用临时目录作为项目根目录
+        env = os.environ.copy()
+        env["PWD"] = str(project_root)
 
-        # 运行 wrapper script 的核心逻辑（模拟）
-        # 实际测试中，我们验证 wrapper 输出是否包含分类 section
-        # 由于 wrapper script 在用户目录，这里通过 mock 来验证逻辑
+        # 运行 wrapper script
+        result = subprocess.run(
+            [str(wrapper_script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            cwd=str(project_root),
+        )
 
-        # 测试验证点：输出应包含 "Palace Overview" 或 wing 信息
-        # 这个测试确保 wrapper script 的设计目标是正确的
-        # 实际运行测试需要手动执行 wrapper script
+        output = result.stdout
 
-        # 标记测试为预期通过（wrapper script 已实现功能）
-        # 真正的验证在 Step 4 手动测试中完成
-        assert True  # wrapper script 逻辑正确，手动测试验证
+        # 验证输出包含 Palace Overview section（wrapper 脚本第 181 行）
+        assert "Palace Overview" in output, (
+            f"缺少 Palace Overview section。\n"
+            f"输出前800字符：\n{output[:800]}\n"
+            f"stderr: {result.stderr}"
+        )
+        # 验证输出包含 Wing 结构关键词
+        assert "WING:" in output or "wing" in output.lower() or "mempalace" in output.lower(), (
+            f"缺少 Wing 结构或 mempalace 相关内容。\n"
+            f"输出前800字符：\n{output[:800]}"
+        )
