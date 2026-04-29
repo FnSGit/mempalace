@@ -8,8 +8,31 @@ These hook scripts make MemPalace save automatically. No manual "save" commands 
 |------|--------------|-------------|
 | **Save Hook** | Every 15 human messages | Blocks the AI, tells it to save key topics/decisions/quotes to the palace |
 | **PreCompact Hook** | Right before context compaction | Emergency save — forces the AI to save EVERYTHING before losing context |
+| **UserPromptSubmit Hook** | Every user message | Extracts entity names → injects KG facts → AI has instant context |
 
 The AI does the actual filing — it knows the conversation context, so it classifies memories into the right wings/halls/closets. The hooks just tell it WHEN to save.
+
+### UserPromptSubmit Hook — Entity-Triggered KG Injection
+
+When a user mentions known entities (people/projects), this hook automatically injects relevant knowledge graph facts into Claude's context.
+
+**Example:**
+- User: "Alice 做了什么决定？"
+- Hook: Extracts "Alice" → Queries KG → Injects facts
+- AI: Knows the answer without needing to search
+
+**Installation:**
+```bash
+# Install the hook
+mempalace hooks-cli manage-userpromptsSubmit-wrapper --action install
+
+# Check status
+mempalace hooks-cli manage-userpromptsSubmit-wrapper --action status
+```
+
+The hook registers automatically in `~/.claude/settings.json` and creates a wrapper script at `~/.claude/hooks/mempal-userpromptsubmit-wrapper.sh`.
+
+**See `docs/hooks-entity-injection.md` for full documentation, troubleshooting, and examples.**
 
 ## Install — Claude Code
 
@@ -41,6 +64,14 @@ Make them executable:
 ```bash
 chmod +x hooks/mempal_save_hook.sh hooks/mempal_precompact_hook.sh
 ```
+
+**UserPromptSubmit Hook:**
+```bash
+# Install via hooks CLI
+mempalace hooks-cli manage-userpromptsSubmit-wrapper --action install
+```
+
+This creates the wrapper script and updates settings.json automatically.
 
 ## Install — Codex CLI (OpenAI)
 
