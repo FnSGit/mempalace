@@ -745,3 +745,119 @@ def test_session_start_includes_taxonomy():
             f"缺少 Wing 结构或 mempalace 相关内容。\n"
             f"输出前800字符：\n{output[:800]}"
         )
+
+
+# --- UserPromptSubmit Edge Cases ---
+
+
+def test_hook_user_prompt_submit_empty_data():
+    """测试空 stdin 输入（Claude Code bug #996）"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+
+    result = _capture_hook_output(hook_user_prompt_submit, {}, harness="claude-code")
+    assert result == {}
+
+
+def test_hook_user_prompt_submit_empty_prompt():
+    """测试空提示字符串"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+
+    result = _capture_hook_output(
+        hook_user_prompt_submit,
+        {"session_id": "test", "prompt": ""},
+        harness="claude-code"
+    )
+    assert result == {}
+
+
+def test_hook_user_prompt_submit_deduplication():
+    """测试事实去重逻辑"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+        # 添加重复事实（Alice works_at TechCorp）
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2025-01-01")
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2026-01-01")  # 重复
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 在哪里工作？"},
+                    harness="claude-code"
+                )
+
+        # 应去重，只显示一个 works_at TechCorp
+        context = output.get("additionalContext", "")
+        works_at_count = context.count("works_at TechCorp")
+        assert works_at_count == 1, f"期望去重后只有 1 个 works_at，实际有 {works_at_count}"
+
+
+def test_hook_user_prompt_submit_context_truncation():
+    """测试上下文截断逻辑（超过 9500 字符）"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+
+        # 添加大量事实（超过 9500 字符）
+        for i in range(500):  # 每个事实约 100 字符，500 个事实 = 50000 字符
+            kg.add_triple("Alice", f"decision_{i}", f"Result_{i}_with_long_description_text", valid_from="2026-01-01")
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 做了什么决定？"},
+                    harness="claude-code"
+                )
+
+        context = output.get("additionalContext", "")
+        # 验证截断提示存在
+        assert "[...截断" in context or len(context) < 10000, (
+            f"期望截断或总长度 < 10000，实际长度：{len(context)}"
+        )
+
+
+def test_hook_user_prompt_submit_entity_limit():
+    """测试每个实体最多 10 个事实的限制"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+
+        # Alice 有 15 个事实（应限制为 10 个）
+        for i in range(15):
+            kg.add_triple("Alice", f"fact_{i}", f"Value_{i}", valid_from="2026-01-01")
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 的信息"},
+                    harness="claude-code"
+                )
+
+        context = output.get("additionalContext", "")
+        # 计算事实数量（每行以 "- " 开头）
+        fact_lines = [line for line in context.split("\n") if line.startswith("- ")]
+        assert len(fact_lines) <= 10, f"期望最多 10 个事实，实际有 {len(fact_lines)}"
