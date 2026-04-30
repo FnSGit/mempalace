@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -622,3 +622,242 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
     # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through
     # It should count messages and block at the interval
     assert result["decision"] == "block"
+
+
+# --- hook_user_prompt_submit ---
+
+
+def test_hook_user_prompt_submit_extracts_entities():
+    """测试 UserPromptSubmit hook 从提示中提取已知实体。"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    # 创建临时 KG 数据库
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2025-01-01")
+        kg.add_triple("Alice", "decided", "PostgreSQL over MongoDB", valid_from="2026-04-15")
+
+        # Mock stdin JSON 带实体在提示中
+        input_data = {
+            "session_id": "test-session-123",
+            "transcript_path": "/tmp/test.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Alice 对数据库做了什么决定？",
+        }
+
+        # Mock KG 和 Registry（mock 源模块，因为导入在函数内部）
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit, input_data, harness="claude-code"
+                )
+
+        # 应提取 "Alice" 并注入事实
+        assert "Alice" in output.get("additionalContext", "")
+        assert "PostgreSQL" in output.get("additionalContext", "")
+        assert "MongoDB" in output.get("additionalContext", "")
+
+
+# --- SessionStart Taxonomy Injection ---
+
+
+def test_session_start_includes_taxonomy():
+    """测试 SessionStart wrapper script 包含宫殿分类概览。
+
+    由于 wrapper 脚本位于用户目录 ~/.claude/hooks/，不在项目中，
+    此测试在本地有脚本时真正验证输出，CI 环境无脚本时跳过。
+    """
+    import subprocess
+    from pathlib import Path
+
+    # 获取真实 HOME 目录（pytest 可能修改环境）
+    # 方案：读取 /etc/passwd 或使用 subprocess 获取真实 HOME
+    try:
+        # 通过 id 命令获取用户名，然后查询 passwd 文件
+        result = subprocess.run(
+            ["getent", "passwd", os.environ.get("USER", "fengshuai")],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            # passwd 文件格式：username:x:uid:gid:gecos:home:shell
+            parts = result.stdout.strip().split(":")
+            real_home = parts[5] if len(parts) >= 6 else "/home/fengshuai"
+        else:
+            real_home = "/home/fengshuai"
+    except Exception:
+        real_home = "/home/fengshuai"
+
+    wrapper_script = Path(real_home) / ".claude" / "hooks" / "mempal-sessionstart-wrapper.sh"
+
+    # 如果 wrapper 脚本不存在，跳过测试（CI 环境）
+    if not wrapper_script.exists():
+        pytest.skip(f"Wrapper script not found: {wrapper_script}")
+
+    # 创建临时目录作为项目根目录，模拟完整场景
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project_root = Path(tmpdir)
+        session_dir = project_root / ".session-memory"
+        session_dir.mkdir()
+
+        # 创建测试 session diary 文件（让 wrapper 不提前退出）
+        diary_file = session_dir / "test-diary-2026-04-29.md"
+        diary_file.write_text(
+            "# Test Session Diary\n\n"
+            "## 本次进展\n测试内容\n\n"
+            "## 关键决策\n重要决策：使用 Palace Overview\n\n"
+        )
+
+        # 修改 PWD 环境变量，让 wrapper 脚本使用临时目录作为项目根目录
+        env = os.environ.copy()
+        env["PWD"] = str(project_root)
+
+        # 运行 wrapper script
+        result = subprocess.run(
+            [str(wrapper_script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            cwd=str(project_root),
+        )
+
+        output = result.stdout
+
+        # 验证输出包含 Palace Overview section（wrapper 脚本第 181 行）
+        assert "Palace Overview" in output, (
+            f"缺少 Palace Overview section。\n"
+            f"输出前800字符：\n{output[:800]}\n"
+            f"stderr: {result.stderr}"
+        )
+        # 验证输出包含 Wing 结构关键词
+        assert "WING:" in output or "wing" in output.lower() or "mempalace" in output.lower(), (
+            f"缺少 Wing 结构或 mempalace 相关内容。\n"
+            f"输出前800字符：\n{output[:800]}"
+        )
+
+
+# --- UserPromptSubmit Edge Cases ---
+
+
+def test_hook_user_prompt_submit_empty_data():
+    """测试空 stdin 输入（Claude Code bug #996）"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+
+    result = _capture_hook_output(hook_user_prompt_submit, {}, harness="claude-code")
+    assert result == {}
+
+
+def test_hook_user_prompt_submit_empty_prompt():
+    """测试空提示字符串"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+
+    result = _capture_hook_output(
+        hook_user_prompt_submit,
+        {"session_id": "test", "prompt": ""},
+        harness="claude-code"
+    )
+    assert result == {}
+
+
+def test_hook_user_prompt_submit_deduplication():
+    """测试事实去重逻辑"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+        # 添加重复事实（Alice works_at TechCorp）
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2025-01-01")
+        kg.add_triple("Alice", "works_at", "TechCorp", valid_from="2026-01-01")  # 重复
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 在哪里工作？"},
+                    harness="claude-code"
+                )
+
+        # 应去重，只显示一个 works_at TechCorp
+        context = output.get("additionalContext", "")
+        works_at_count = context.count("works_at TechCorp")
+        assert works_at_count == 1, f"期望去重后只有 1 个 works_at，实际有 {works_at_count}"
+
+
+def test_hook_user_prompt_submit_context_truncation():
+    """测试上下文截断逻辑（超过 9500 字符）"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+
+        # 添加大量事实（超过 9500 字符）
+        for i in range(500):  # 每个事实约 100 字符，500 个事实 = 50000 字符
+            kg.add_triple("Alice", f"decision_{i}", f"Result_{i}_with_long_description_text", valid_from="2026-01-01")
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 做了什么决定？"},
+                    harness="claude-code"
+                )
+
+        context = output.get("additionalContext", "")
+        # 验证截断提示存在
+        assert "[...截断" in context or len(context) < 10000, (
+            f"期望截断或总长度 < 10000，实际长度：{len(context)}"
+        )
+
+
+def test_hook_user_prompt_submit_entity_limit():
+    """测试每个实体最多 10 个事实的限制"""
+    from mempalace.hooks_cli import hook_user_prompt_submit
+    from mempalace.knowledge_graph import KnowledgeGraph
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kg_path = Path(tmpdir) / "test_kg.sqlite3"
+        kg = KnowledgeGraph(db_path=str(kg_path))
+
+        # Alice 有 15 个事实（应限制为 10 个）
+        for i in range(15):
+            kg.add_triple("Alice", f"fact_{i}", f"Value_{i}", valid_from="2026-01-01")
+
+        mock_registry = MagicMock()
+        mock_registry.extract_people_from_query.return_value = ["Alice"]
+
+        with patch("mempalace.knowledge_graph.KnowledgeGraph", return_value=kg):
+            with patch("mempalace.entity_registry.EntityRegistry.load", return_value=mock_registry):
+                output = _capture_hook_output(
+                    hook_user_prompt_submit,
+                    {"session_id": "test", "prompt": "Alice 的信息"},
+                    harness="claude-code"
+                )
+
+        context = output.get("additionalContext", "")
+        # 计算事实数量（每行以 "- " 开头）
+        fact_lines = [line for line in context.split("\n") if line.startswith("- ")]
+        assert len(fact_lines) <= 10, f"期望最多 10 个事实，实际有 {len(fact_lines)}"

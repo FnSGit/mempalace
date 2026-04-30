@@ -249,6 +249,7 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
         "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
+        "prompt": str(data.get("prompt", "")),  # UserPromptSubmit field
     }
 
 
@@ -326,6 +327,123 @@ def hook_precompact(data: dict, harness: str):
     _output({})
 
 
+def hook_user_prompt_submit(data: dict, harness: str):
+    """
+    UserPromptSubmit hook: 从用户提示提取实体并注入 KG 事实。
+
+    流程：
+    1. 使用 entity_registry 从提示中提取实体名称
+    2. 对每个实体查询 KG（outgoing 关系）
+    3. 将事实格式化为紧凑上下文（最多 9500 字符）
+    4. 通过 additionalContext 字段注入（不阻塞）
+
+    返回: {"additionalContext": "..."} 或 {} 如果没有实体
+    """
+    from .entity_registry import EntityRegistry
+    from .knowledge_graph import KnowledgeGraph
+
+    # 处理空输入（Claude Code bug #996）
+    if not data:
+        _output({})
+        return
+
+    parsed = _parse_harness_input(data, harness)
+    session_id = parsed.get("session_id", "unknown")
+    prompt = parsed.get("prompt", "")
+
+    if not prompt:
+        _output({})
+        return
+
+    _log(f"USER PROMPT SUBMIT: session={session_id}, prompt='{prompt[:50]}...'")
+
+    # 从提示中提取已知人物
+    registry = EntityRegistry.load()
+    people = registry.extract_people_from_query(prompt)
+
+    if not people:
+        _output({})
+        return
+
+    _log(f"提取的实体：{people}")
+
+    # 对每个实体查询 KG
+    kg = KnowledgeGraph()
+    all_facts = []  # 存储所有事实（未去重）
+    MAX_CONTEXT_CHARS = 9500  # Claude Code 限制是 10000，留缓冲
+
+    for name in people:
+        try:
+            results = kg.query_entity(name, direction="outgoing")
+            current_facts = [r for r in results if r.get("current", True)]
+            all_facts.extend(current_facts)
+        except Exception as e:
+            _log(f"{name} 的 KG 查询错误：{e}")
+            continue
+
+    _log(f"KG 查询：{len(all_facts)} 个事实（未去重）")
+
+    # 去重事实（相同 subject+predicate+object）
+    seen_facts = set()
+    unique_facts = []
+    for fact in all_facts:
+        key = f"{fact['subject']}|{fact['predicate']}|{fact['object']}"
+        if key not in seen_facts:
+            seen_facts.add(key)
+            unique_facts.append(fact)
+
+    facts = unique_facts
+    _log(f"去重后：{len(facts)} 个唯一事实")
+
+    if not facts:
+        _output({})
+        return
+
+    # 格式化事实为文本行（每个实体最多 10 个事实）
+    fact_lines = []
+    total_chars = 0
+    entity_fact_count = {}  # 每个实体的事实计数
+
+    for fact in facts:
+        subject = fact["subject"]
+        # 每个实体最多 10 个事实
+        if entity_fact_count.get(subject, 0) >= 10:
+            continue
+
+        line = f"- {fact['subject']} {fact['predicate']} {fact['object']}"
+        if fact.get("valid_from"):
+            line += f"（自 {fact['valid_from']}）"
+
+        # 检查字符限制
+        if total_chars + len(line) + 1 > MAX_CONTEXT_CHARS:  # +1 用于换行
+            # 截断并添加提示
+            remaining_chars = MAX_CONTEXT_CHARS - total_chars
+            if remaining_chars > 50:  # 确保有足够空间添加截断提示
+                line = line[:remaining_chars - 50]
+                fact_lines.append(line)
+                fact_lines.append("[...截断，使用 mempalace_kg_query 获取完整事实]")
+            break
+
+        fact_lines.append(line)
+        total_chars += len(line) + 1  # +1 用于换行
+        entity_fact_count[subject] = entity_fact_count.get(subject, 0) + 1
+
+    # 格式化上下文块
+    context_lines = [
+        "[MemPalace 自动上下文 — 知识图谱事实]",
+        f"检测到的实体：{', '.join(people)}",
+        "",
+    ] + fact_lines
+
+    context_text = "\n".join(context_lines)
+
+    _log(f"注入上下文：{len(fact_lines)} 个事实，{total_chars} 字符")
+
+    # 注入而不阻塞
+    output = {"additionalContext": context_text}
+    _output(output)
+
+
 def run_hook(hook_name: str, harness: str):
     """Main entry point: read stdin JSON, dispatch to hook handler."""
     try:
@@ -338,6 +456,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "user-prompt-submit": hook_user_prompt_submit,
     }
 
     handler = hooks.get(hook_name)
